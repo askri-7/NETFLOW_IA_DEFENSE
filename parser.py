@@ -1,4 +1,4 @@
-#!/home/no_data/NETFLOW_IA/venv/bin/python3
+
 
 """
 OSSEC Network Traffic Anomaly Defender - Phase 1: Flow Builder
