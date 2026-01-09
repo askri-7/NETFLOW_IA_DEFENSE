@@ -1,9 +1,11 @@
-
+#!/home/no_data/NETFLOW_IA/venv/bin/python3
 
 """
 OSSEC Network Traffic Anomaly Defender - Phase 1: Flow Builder
 Optimized for ML analysis with entropy-based suspicion scoring
 Multi-protocol support: IPv4, IPv6, ARP, Layer 2
+Session-based architecture for ML training
+Enhanced: Time-based flow export to prevent RAM explosion and ensure long flows are analyzed
 """
 
 from scapy.all import *
@@ -13,14 +15,40 @@ import math
 import pandas as pd
 import numpy as np
 import os
+import glob
 
 # --- Configuration ---
-FLOW_TIMEOUT = 60  # seconds - close inactive flows
-FLOW_EXPORT_BATCH = 1000  # Export every N flows
-OUTPUT_FILE = "flows.csv"
+FLOW_TIMEOUT = 15  # seconds - close inactive flows
+FLOW_EXPORT_BATCH = 100  # Export every N flows
+FLOW_MAX_AGE = 30  # 5 minutes - export snapshots of long flows
+FLOW_MEMORY_LIMIT = 10  # Keep only last N packets in memory
+FLOWS_DIR = 'flows'  # Directory for all flow files
+MASTER_FILE = os.path.join(FLOWS_DIR, 'flows_master.csv')  # Complete history
 
 class FlowBuilder:
     def __init__(self):
+        # Create flows directory if it doesn't exist
+        os.makedirs(FLOWS_DIR, exist_ok=True)
+        
+        # Get next session ID
+        self.session_id = self._get_next_session_id()
+        self.session_file = os.path.join(FLOWS_DIR, f'flows_session_{self.session_id:03d}.csv')
+        
+        # Banner
+        print(f"╔═══════════════════════════════════════════════════════════════╗")
+        print(f"║ OSSEC Network Traffic Anomaly Defender - Flow Builder        ║")
+        print(f"║ Phase 1: Parser (IPv4/IPv6/ARP Support)                      ║")
+        print(f"║ Session-Based Architecture + Long-Flow Snapshots             ║")
+        print(f"╚═══════════════════════════════════════════════════════════════╝")
+        print(f"")
+        print(f"🔖 Session ID: {self.session_id:03d}")
+        print(f"📁 Session file: {self.session_file}")
+        print(f"📁 Master file: {MASTER_FILE}")
+        print(f"📊 Flow timeout: {FLOW_TIMEOUT}s")
+        print(f"⏰ Max flow age: {FLOW_MAX_AGE}s (snapshot interval)")
+        print(f"💾 Export batch size: {FLOW_EXPORT_BATCH} flows")
+        print(f"🧠 Memory limit: {FLOW_MEMORY_LIMIT} packets per flow\n")
+        
         # Active flows: key = 5-tuple, value = flow stats
         self.active_flows = {}
         
@@ -32,6 +60,7 @@ class FlowBuilder:
             'total_packets': 0,
             'total_flows': 0,
             'exported_flows': 0,
+            'snapshot_flows': 0,
             'ipv4_packets': 0,
             'ipv6_packets': 0,
             'arp_packets': 0,
@@ -40,10 +69,29 @@ class FlowBuilder:
         
         self.start_time = time.time()
         self.last_cleanup = time.time()
+    
+    def _get_next_session_id(self):
+        """Find next available session ID"""
+        if not os.path.exists(FLOWS_DIR):
+            return 1
         
-        print("🚀 Flow Builder initialized (IPv4 + IPv6 + ARP)")
-        print(f"📊 Flow timeout: {FLOW_TIMEOUT}s")
-        print(f"💾 Export batch size: {FLOW_EXPORT_BATCH} flows\n")
+        # List all session files
+        session_files = glob.glob(os.path.join(FLOWS_DIR, 'flows_session_*.csv'))
+        
+        if not session_files:
+            return 1
+        
+        # Extract session numbers
+        session_numbers = []
+        for f in session_files:
+            try:
+                basename = os.path.basename(f)
+                num = int(basename.split('_')[2].split('.')[0])
+                session_numbers.append(num)
+            except:
+                pass
+        
+        return max(session_numbers) + 1 if session_numbers else 1
     
     def process_packet(self, packet):
         """Process each packet in real-time and build flows"""
@@ -70,9 +118,9 @@ class FlowBuilder:
             # Show progress
             if self.stats['total_packets'] % 1000 == 0:
                 self._print_progress()
-                
+        
         except Exception as e:
-            print(f"⚠️ Error processing packet: {e}")
+            print(f"⚠️  Error processing packet: {e}")
     
     def _extract_flow_key(self, packet):
         """
@@ -173,7 +221,7 @@ class FlowBuilder:
             direction = 1
         
         return flow_key, direction, metadata
-
+    
     def _create_flow(self, flow_key, packet, direction, metadata):
         """Create a new flow from first packet"""
         current_time = time.time()
@@ -245,12 +293,13 @@ class FlowBuilder:
             if flow['fwd_last_time']:
                 iat = current_time - flow['fwd_last_time']
                 flow['fwd_iat'].append(iat)
+            
             flow['fwd_last_time'] = current_time
             
             # TCP flags
             if packet.haslayer(TCP):
                 flow['fwd_tcp_flags'] |= self._get_tcp_flags(packet)
-                
+        
         else:  # Reverse
             flow['bwd_packets'] += 1
             flow['bwd_bytes'] += packet_size
@@ -259,6 +308,7 @@ class FlowBuilder:
             if flow['bwd_last_time']:
                 iat = current_time - flow['bwd_last_time']
                 flow['bwd_iat'].append(iat)
+            
             flow['bwd_last_time'] = current_time
             
             if packet.haslayer(TCP):
@@ -276,11 +326,12 @@ class FlowBuilder:
         
         flags = packet[TCP].flags
         flag_map = {'F': 1, 'S': 2, 'R': 4, 'P': 8, 'A': 16, 'U': 32}
-        
         result = 0
+        
         for flag_char, flag_val in flag_map.items():
             if flag_char in str(flags):
                 result |= flag_val
+        
         return result
     
     def _calculate_entropy(self, data):
@@ -328,8 +379,51 @@ class FlowBuilder:
         if len(self.completed_flows) >= FLOW_EXPORT_BATCH:
             self._export_flows()
         
+        # 🆕 NEW: Export long-lived flows (snapshots)
+        self._export_long_flows()
+        
         if expired_flows:
             print(f"🔄 Cleaned up {len(expired_flows)} flows | Active: {len(self.active_flows)}")
+    
+    def _export_long_flows(self):
+        """
+        Export snapshots of flows active for too long (5 min)
+        Prevents: 1) Long flows never analyzed, 2) RAM explosion
+        Flow stays active but RAM is cleaned
+        """
+        current_time = time.time()
+        flows_to_export = []
+        
+        for flow_key, flow_data in list(self.active_flows.items()):
+            flow_age = current_time - flow_data['start_time']
+            
+            # If flow older than 5 minutes, export snapshot
+            if flow_age > FLOW_MAX_AGE:
+                # Create snapshot
+                completed_flow = self._finalize_flow(flow_data)
+                flows_to_export.append(completed_flow)
+                
+                # Clean RAM: keep only recent packets
+                flow_data['fwd_packet_sizes'] = flow_data['fwd_packet_sizes'][-FLOW_MEMORY_LIMIT:]
+                flow_data['bwd_packet_sizes'] = flow_data['bwd_packet_sizes'][-FLOW_MEMORY_LIMIT:]
+                flow_data['fwd_iat'] = flow_data['fwd_iat'][-FLOW_MEMORY_LIMIT:]
+                flow_data['bwd_iat'] = flow_data['bwd_iat'][-FLOW_MEMORY_LIMIT:]
+                
+                # Reset counters for next snapshot
+                flow_data['start_time'] = current_time
+                flow_data['fwd_packets'] = 0
+                flow_data['bwd_packets'] = 0
+                flow_data['fwd_bytes'] = 0
+                flow_data['bwd_bytes'] = 0
+                
+                self.stats['snapshot_flows'] += 1
+                
+                print(f"📸 Snapshot: {flow_key[0]}:{flow_key[2]} → {flow_key[1]}:{flow_key[3]} (age: {flow_age:.0f}s)")
+        
+        # Export snapshots to buffer
+        if flows_to_export:
+            self.completed_flows.extend(flows_to_export)
+            print(f"📤 Added {len(flows_to_export)} long-flow snapshots to export buffer")
     
     def _finalize_flow(self, flow_data):
         """
@@ -364,6 +458,11 @@ class FlowBuilder:
             'bwd_packets_per_sec': flow_data['bwd_packets'] / duration if duration > 0 else 0,
             'flow_bytes_per_sec': total_bytes / duration if duration > 0 else 0,
             
+            # === Additional Features ===
+            'tos': flow_data['tos'],
+            'ttl': flow_data['ttl'],
+            'ip_version': flow_data['ip_version'],
+            
             # === Packet Size Features ===
             'fwd_packet_length_mean': np.mean(flow_data['fwd_packet_sizes']) if flow_data['fwd_packet_sizes'] else 0,
             'fwd_packet_length_std': np.std(flow_data['fwd_packet_sizes']) if flow_data['fwd_packet_sizes'] else 0,
@@ -384,6 +483,10 @@ class FlowBuilder:
             'bwd_iat_mean': np.mean(flow_data['bwd_iat']) if flow_data['bwd_iat'] else 0,
             'bwd_iat_std': np.std(flow_data['bwd_iat']) if flow_data['bwd_iat'] else 0,
             
+            # === Behavioral Ratios ===
+            'bwd_to_fwd_packet_ratio': flow_data['bwd_packets'] / flow_data['fwd_packets'] if flow_data['fwd_packets'] > 0 else 0,
+            'bwd_to_fwd_byte_ratio': flow_data['bwd_bytes'] / flow_data['fwd_bytes'] if flow_data['fwd_bytes'] > 0 else 0,
+            
             # === TCP Flags ===
             'fwd_psh_flags': 1 if (flow_data['fwd_tcp_flags'] & 8) else 0,
             'fwd_urg_flags': 1 if (flow_data['fwd_tcp_flags'] & 32) else 0,
@@ -399,43 +502,41 @@ class FlowBuilder:
             'bwd_rst_flags': 1 if (flow_data['bwd_tcp_flags'] & 4) else 0,
             'bwd_ack_flags': 1 if (flow_data['bwd_tcp_flags'] & 16) else 0,
             
-            # === Entropy Features (Suspicion Score) ===
-            'avg_payload_entropy': np.mean(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
-            'max_payload_entropy': max(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
-            'min_payload_entropy': min(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
-            
-            # === Additional Features ===
-            'tos': flow_data['tos'],
-            'ttl': flow_data['ttl'],
-            'ip_version': flow_data['ip_version'],
-            
-            # === Behavioral Ratios ===
-            'bwd_to_fwd_packet_ratio': flow_data['bwd_packets'] / flow_data['fwd_packets'] if flow_data['fwd_packets'] > 0 else 0,
-            'bwd_to_fwd_byte_ratio': flow_data['bwd_bytes'] / flow_data['fwd_bytes'] if flow_data['fwd_bytes'] > 0 else 0,
-            
             # === Protocol Indicators ===
             'is_tcp': 1 if 'TCP' in flow_data['protocol'] else 0,
             'is_udp': 1 if 'UDP' in flow_data['protocol'] else 0,
             'is_arp': 1 if 'ARP' in flow_data['protocol'] else 0,
             'is_icmp': 1 if 'IP_1' in flow_data['protocol'] else 0,
             'is_ipv6': 1 if flow_data['ip_version'] == 6 else 0,
+            
+            # === Entropy Features (Suspicion Score) ===
+            'avg_payload_entropy': np.mean(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
+            'max_payload_entropy': max(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
+            'min_payload_entropy': min(flow_data['payload_entropy_samples']) if flow_data['payload_entropy_samples'] else 0,
         }
         
         return finalized
     
     def _export_flows(self):
-        """Export completed flows to CSV"""
+        """Export completed flows to SESSION file and MASTER file"""
         if not self.completed_flows:
             return
         
         df = pd.DataFrame(self.completed_flows)
         
-        # Append to CSV (create with header first time)
-        file_exists = os.path.isfile(OUTPUT_FILE)
-        df.to_csv(OUTPUT_FILE, mode='a', header=not file_exists, index=False)
+        # 1. Export to SESSION file (for ML analysis)
+        session_exists = os.path.isfile(self.session_file)
+        df.to_csv(self.session_file, mode='a', header=not session_exists, index=False)
+        
+        # 2. Export to MASTER file (complete history)
+        master_exists = os.path.isfile(MASTER_FILE)
+        df.to_csv(MASTER_FILE, mode='a', header=not master_exists, index=False)
         
         self.stats['exported_flows'] += len(self.completed_flows)
-        print(f"💾 Exported {len(self.completed_flows)} flows to {OUTPUT_FILE}")
+        
+        print(f"💾 Exported {len(self.completed_flows)} flows")
+        print(f"   → Session #{self.session_id:03d}: {os.path.basename(self.session_file)}")
+        print(f"   → Master: {os.path.basename(MASTER_FILE)}")
         print(f"📊 Total exported: {self.stats['exported_flows']} flows")
         
         # Clear buffer
@@ -449,6 +550,7 @@ class FlowBuilder:
         print(f"📈 Packets: {self.stats['total_packets']:,} | "
               f"Active Flows: {len(self.active_flows):,} | "
               f"Exported: {self.stats['exported_flows']:,} | "
+              f"Snapshots: {self.stats['snapshot_flows']:,} | "
               f"Rate: {pps:.1f} pkt/s")
         print(f"   IPv4: {self.stats['ipv4_packets']} | "
               f"IPv6: {self.stats['ipv6_packets']} | "
@@ -470,8 +572,9 @@ class FlowBuilder:
         
         # Final stats
         elapsed = time.time() - self.start_time
+        
         print(f"\n{'='*70}")
-        print(f"📊 FINAL STATISTICS")
+        print(f"📊 FINAL STATISTICS - Session #{self.session_id:03d}")
         print(f"{'='*70}")
         print(f"⏱️  Duration: {elapsed:.1f}s")
         print(f"📦 Total Packets: {self.stats['total_packets']:,}")
@@ -481,20 +584,14 @@ class FlowBuilder:
         print(f"   - Other: {self.stats['other_packets']:,}")
         print(f"🌊 Total Flows: {self.stats['total_flows']:,}")
         print(f"💾 Exported Flows: {self.stats['exported_flows']:,}")
+        print(f"📸 Snapshot Flows: {self.stats['snapshot_flows']:,}")
         print(f"📈 Avg Packet Rate: {self.stats['total_packets']/elapsed:.1f} pkt/s")
-        print(f"📁 Output File: {OUTPUT_FILE}")
+        print(f"📁 Session File: {self.session_file}")
+        print(f"📁 Master File: {MASTER_FILE}")
         print(f"{'='*70}\n")
-
 
 def main():
     """Main execution"""
-    print("""
-╔═══════════════════════════════════════════════════════════════╗
-║     OSSEC Network Traffic Anomaly Defender - Flow Builder     ║
-║          Phase 1: Parser (IPv4/IPv6/ARP Support)              ║
-╚═══════════════════════════════════════════════════════════════╝
-""")
-    
     builder = FlowBuilder()
     
     try:
@@ -503,18 +600,20 @@ def main():
         
         # Start capture with store=False for memory efficiency
         sniff(prn=builder.process_packet, store=False)
-        
+    
     except KeyboardInterrupt:
         print("\n\n⏸️  Capture interrupted by user")
+    
     except PermissionError:
-        print("\n❌ Permission denied! Run with: sudo python3 flow_builder.py")
+        print("\n❌ Permission denied! Run with: sudo python3 parser.py")
+    
     except Exception as e:
         print(f"\n💥 Error: {e}")
         import traceback
         traceback.print_exc()
+    
     finally:
         builder.finalize()
-
 
 if __name__ == "__main__":
     main()
