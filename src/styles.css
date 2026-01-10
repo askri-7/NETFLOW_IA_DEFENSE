@@ -1,0 +1,42 @@
+/* You can add global styles to this file, and also import other style files */
+
+:root {
+    --bg: #0b1220;
+    --panel: #111827;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+
+    --green: #22c55e;
+    --yellow: #f59e0b;
+    --orange: #f97316;
+    --red: #ef4444;
+    --blue: #3b82f6;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: Inter, system-ui, sans-serif;
+}
+
+body {
+
+    background-image: url(assets/bg.png);
+    color: var(--text);
+}
+.btn {
+    background: var(--blue);
+    border: none;
+    padding: 8px 14px;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+}
+h2 {
+    font-size: 15px;
+    margin-bottom: 12px;
+    color: var(--muted);
+}
+

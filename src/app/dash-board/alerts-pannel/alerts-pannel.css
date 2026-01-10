@@ -1,0 +1,18 @@
+.alert {
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    border-left: 4px solid;
+}
+
+.alert.critical {
+    border-color: var(--red);
+}
+
+.alert.high {
+    border-color: var(--orange);
+}
+
+.alert.medium {
+    border-color: var(--yellow);
+}
