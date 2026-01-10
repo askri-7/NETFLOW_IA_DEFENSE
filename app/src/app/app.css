@@ -1,0 +1,16 @@
+app-navbar {
+    height: 60px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+app-dash-board {
+    display: grid;
+    grid-template-columns: 260px 1fr 260px;
+    grid-template-rows: 1fr auto;
+    gap: 16px;
+    padding: 16px;
+}
