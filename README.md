@@ -13,8 +13,12 @@ This interface was generated using
 
 ### Development server
 
+Vercel Deployment:  
+https://netflow-ai-defence-1y48.vercel.app
+
 To start a local development server, run:
 
 ```bash
 ng serve
+
 
